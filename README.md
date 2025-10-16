@@ -1,5 +1,8 @@
 # Neorg Documentation Lambda
 
+> WARNING 
+> This is not actually real documentation yet just had claude s#*+ something out for a second before running home. 
+
 A containerized microservice that converts Neorg (`.norg`) documents to Markdown using Neovim with the Neorg plugin. Designed for homelab deployment and integration with GitHub Actions for automated documentation publishing.
 
 ## Overview
