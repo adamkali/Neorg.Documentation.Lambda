@@ -17,7 +17,7 @@ This service provides a REST API that:
 ## Prerequisites
 
 - Docker and Docker Compose (for deployment)
-- Go 1.21+ (for development)
+- Go 1.25+ (for development)
 - Access to your homelab environment
 
 ## Quick Start
@@ -29,9 +29,9 @@ This service provides a REST API that:
 git clone <repository-url>
 cd Neorg.Documentation.Lambda
 
-# Build and run with Docker
-docker build -t neorg-lambda .
-docker run -d \
+# Build and run with Docker (with platform specification for compatibility)
+docker build --platform linux/amd64 -t neorg-lambda .
+docker run --platform linux/amd64 -d \
   --name neorg-converter \
   -p 8080:8080 \
   -e NEORG_DOCUMENTATION_AUTH_TOKEN=your-secure-token-here \
@@ -48,7 +48,10 @@ version: '3.8'
 
 services:
   neorg-converter:
-    build: .
+    build: 
+      context: .
+      platforms:
+        - linux/amd64
     container_name: neorg-converter
     ports:
       - "8080:8080"
@@ -299,14 +302,20 @@ To customize the Neovim configuration, modify `.config/nvim/init.lua` and rebuil
 
 ### Local Development
 
+**Requirements:**
+- Go 1.25+ (matching go.mod requirement)
+- Neovim with Neorg plugin (for local testing)
+
 ```bash
 # Install dependencies
 go mod tidy
 
 # Run locally (requires Neovim with Neorg plugin)
 export NEORG_DOCUMENTATION_AUTH_TOKEN=test-token
-go run serverless/api.go
+go run ./serverless
 ```
+
+**Note:** The application requires Go 1.25+ as specified in `go.mod`. If you encounter version mismatches, ensure your Docker builder uses `golang:1.25-alpine` image.
 
 ### Testing
 
@@ -390,6 +399,8 @@ services:
 4. **Container fails to start**
    - Check logs: `docker logs neorg-converter`
    - Ensure port 8080 isn't already in use
+   - If you see "exec format error", try building with `--platform linux/amd64`
+   - Verify the Go binary was built correctly with proper package naming
 
 ### Logs
 
@@ -400,6 +411,27 @@ docker logs -f neorg-converter
 # Check health
 docker exec neorg-converter wget -q --spider http://localhost:8080/health
 ```
+
+### Known Issues & Fixes
+
+**Build/Compilation Issues:**
+1. **`wg.Go undefined` compilation error**
+   - **Cause**: Code incorrectly used `sync.WaitGroup.Go()` method which doesn't exist
+   - **Fix**: Use proper goroutine pattern with `wg.Add(1)`, `go func()`, and `defer wg.Done()`
+
+2. **`package serverless is not a main package` error**
+   - **Cause**: Package name was `serverless` instead of `main` for executable
+   - **Fix**: Change `package serverless` to `package main` in `serverless/api.go`
+
+3. **`exec format error` when running container**
+   - **Cause**: Architecture mismatch between build and runtime environments
+   - **Fix**: Use `--platform linux/amd64` flag when building and running containers
+
+**Docker-specific Issues:**
+4. **Container keeps restarting**
+   - Check that the Go binary has execute permissions
+   - Verify the binary architecture matches the container platform
+   - Use Alpine-based Go builder for consistency with runtime environment
 
 ### Performance Tuning
 

@@ -1,7 +1,7 @@
 # Multi-stage build for Neorg Documentation Lambda
 
 # Stage 1: Build Go application
-FROM golang:1.21-alpine AS go-builder
+FROM golang:1.25-alpine AS go-builder
 
 WORKDIR /app
 
@@ -48,8 +48,8 @@ COPY .config/nvim/init.lua /app/.config/nvim/
 # Copy the built Go binary
 COPY --from=go-builder /app/neorg-lambda /app/
 
-# Set ownership
-RUN chown -R appuser:appuser /app /tmp/workdir
+# Set permissions and ownership
+RUN chmod +x /app/neorg-lambda && chown -R appuser:appuser /app /tmp/workdir
 
 # Switch to app user
 USER appuser
