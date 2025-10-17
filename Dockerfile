@@ -1,12 +1,9 @@
 # Multi-stage build for Neorg Documentation Lambda
 
 # Stage 1: Build Go application
-FROM golang:1.25-alpine AS go-builder
+FROM golang:1.25 AS go-builder
 
 WORKDIR /app
-
-# Install build dependencies
-RUN apk add --no-cache git
 
 # Copy go mod files
 COPY go.mod go.sum ./
@@ -19,27 +16,45 @@ COPY serverless/ ./serverless/
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o neorg-lambda ./serverless
 
 # Stage 2: Runtime environment with Neovim
-FROM alpine:3.19
+FROM ubuntu:22.04
+
+# Avoid interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
 
 # Install system dependencies
-RUN apk add --no-cache \
-    neovim \
+RUN apt-get update && apt-get install -y \
     git \
-    luarocks \
     wget \
     curl \
     nodejs \
     npm \
     unzip \
     ca-certificates \
-    && rm -rf /var/cache/apk/*
+    locales \
+    libc6 \
+    libgcc-s1 \
+    libstdc++6 \
+    && rm -rf /var/lib/apt/lists/* \
+    && locale-gen en_US.UTF-8
+
+# Set locale environment variables
+ENV LANG=en_US.UTF-8 \
+    LANGUAGE=en_US:en \
+    LC_ALL=en_US.UTF-8
+
+# Download and install Neovim 0.10+ from official tarball
+RUN wget https://github.com/neovim/neovim/releases/latest/download/nvim-linux-x86_64.tar.gz \
+    && tar xzvf nvim-linux-x86_64.tar.gz \
+    && mv nvim-linux-x86_64 /opt/nvim \
+    && ln -sf /opt/nvim/bin/nvim /usr/local/bin/nvim \
+    && rm nvim-linux-x86_64.tar.gz
 
 # Create app user
-RUN addgroup -g 1001 -S appuser && \
-    adduser -S appuser -u 1001 -G appuser
+RUN groupadd -g 1001 appuser && \
+    useradd -r -u 1001 -g appuser -m appuser
 
 # Create necessary directories
-RUN mkdir -p /app/.config/nvim /app/data /tmp/workdir
+RUN mkdir -p /app/.config/nvim /app/data /tmp/workdir /home/appuser
 WORKDIR /tmp/workdir
 
 # Copy Neovim configuration
@@ -49,7 +64,7 @@ COPY .config/nvim/init.lua /app/.config/nvim/
 COPY --from=go-builder /app/neorg-lambda /app/
 
 # Set permissions and ownership
-RUN chmod +x /app/neorg-lambda && chown -R appuser:appuser /app /tmp/workdir
+RUN chmod +x /app/neorg-lambda && chown -R appuser:appuser /app /tmp/workdir /opt/nvim /home/appuser
 
 # Switch to app user
 USER appuser
@@ -60,7 +75,7 @@ ENV XDG_DATA_HOME=/app/data
 ENV XDG_CACHE_HOME=/app/cache
 
 # Pre-install Neovim plugins in headless mode
-RUN nvim --headless "+Lazy! sync" +qa || true
+RUN /opt/nvim/bin/nvim --headless "+Lazy! sync" +qa || true
 
 # Expose port
 EXPOSE 8080

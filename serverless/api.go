@@ -104,8 +104,6 @@ func convertArgs(inputFileName, outputFileName *os.File) []string {
 	return []string{
 		inputFileName.Name(),
 		"--headless",
-		"--noplugin",
-		"-u", "/app/.config/nvim/init.lua",
 		"-c", fmt.Sprintf(":Neorg export to-file %s markdown", outputFileName.Name()),
 		"-c", ":q",
 	}
@@ -136,7 +134,7 @@ func runNeorgConvert(ctx context.Context, inputFile *os.File) (*os.File, error) 
 
 	// Run the neorg command with context timeout
 	args := convertArgs(inputFile, outputFile)
-	cmd := exec.CommandContext(ctx, "nvim", args...)
+	cmd := exec.CommandContext(ctx, "/opt/nvim/bin/nvim", args...)
 	
 	logger.WithFields(logrus.Fields{
 		"input_file":  originalFilename,
@@ -145,6 +143,11 @@ func runNeorgConvert(ctx context.Context, inputFile *os.File) (*os.File, error) 
 		"args":        args,
 	}).Debug("Executing Neovim conversion command")
 
+	// Capture command output for debugging
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	
 	err = cmd.Run()
 	if err != nil {
 		logger.WithFields(logrus.Fields{
@@ -152,17 +155,44 @@ func runNeorgConvert(ctx context.Context, inputFile *os.File) (*os.File, error) 
 			"output_file": outputFilename,
 			"error":       err.Error(),
 			"command":     fmt.Sprintf("nvim %v", args),
+			"stdout":      stdout.String(),
+			"stderr":      stderr.String(),
 		}).Error("Neovim conversion command failed")
 		
 		outputFile.Close()
 		os.Remove(outputFile.Name())
 		return nil, err
 	}
+	
+	// Log command output for debugging
+	logger.WithFields(logrus.Fields{
+		"input_file":  originalFilename,
+		"output_file": outputFilename,
+		"stdout":      stdout.String(),
+		"stderr":      stderr.String(),
+	}).Debug("Neovim command output")
 
 	// Check if output file has content
 	outputFile.Seek(0, 0) // Seek back to beginning for reading
 	outputFileInfo, _ := outputFile.Stat()
 	fileSize := outputFileInfo.Size()
+	
+	// Read and log the actual file contents for debugging
+	fileContents, err := io.ReadAll(outputFile)
+	if err != nil {
+		logger.WithError(err).Error("Failed to read output file contents")
+	} else {
+		logger.WithFields(logrus.Fields{
+			"input_file":     originalFilename,
+			"output_file":    outputFilename,
+			"output_size":    fileSize,
+			"file_contents":  string(fileContents),
+			"contents_length": len(fileContents),
+		}).Info("Neorg conversion completed - file contents")
+	}
+	
+	// Reset file pointer for later use
+	outputFile.Seek(0, 0)
 	
 	logger.WithFields(logrus.Fields{
 		"input_file":    originalFilename,
@@ -809,11 +839,48 @@ func (rw *responseWriter) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// checkNeorgHealth runs Neovim health check for Neorg functionality
+func checkNeorgHealth() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	
+	cmd := exec.CommandContext(ctx, "/opt/nvim/bin/nvim", "--headless", "-c", ":checkhealth neorg", "-c", ":q")
+	
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	
+	err := cmd.Run()
+	
+	// Log the health check output
+	logger.WithFields(logrus.Fields{
+		"stdout": stdout.String(),
+		"stderr": stderr.String(),
+		"error":  err,
+	}).Debug("Neorg health check output")
+	
+	// Check for specific error indicators in the output
+	output := stdout.String() + stderr.String()
+	if strings.Contains(output, "ERROR") || strings.Contains(output, "command is currently disabled") {
+		return fmt.Errorf("neorg health check failed: %s", output)
+	}
+	
+	return err
+}
+
 func check_health(w http.ResponseWriter, r *http.Request) {
 	logger.WithFields(logrus.Fields{
 		"endpoint": "/health",
 		"method":   r.Method,
 	}).Debug("Health check requested")
+	
+	// Check Neorg health
+	if err := checkNeorgHealth(); err != nil {
+		logger.WithError(err).Error("Neorg health check failed")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, "Service unavailable: Neorg not ready - %v", err)
+		return
+	}
 	
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("OK"))
