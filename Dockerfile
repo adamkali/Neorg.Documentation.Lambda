@@ -21,26 +21,24 @@ FROM ubuntu:22.04
 # Avoid interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
+# Install minimal system dependencies including C compiler for TreeSitter
+RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     wget \
     curl \
-    nodejs \
-    npm \
     unzip \
+    make \
     ca-certificates \
-    locales \
-    libc6 \
-    libgcc-s1 \
-    libstdc++6 \
-    && rm -rf /var/lib/apt/lists/* \
-    && locale-gen en_US.UTF-8
+    lua5.1 \
+    liblua5.1-0 \
+    gcc \
+    g++ \
+    libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 # Set locale environment variables
-ENV LANG=en_US.UTF-8 \
-    LANGUAGE=en_US:en \
-    LC_ALL=en_US.UTF-8
+ENV LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
 
 # Download and install Neovim 0.10+ from official tarball
 RUN wget https://github.com/neovim/neovim/releases/latest/download/nvim-linux-x86_64.tar.gz \
@@ -49,22 +47,32 @@ RUN wget https://github.com/neovim/neovim/releases/latest/download/nvim-linux-x8
     && ln -sf /opt/nvim/bin/nvim /usr/local/bin/nvim \
     && rm nvim-linux-x86_64.tar.gz
 
+# Since lua-utils might not be available via luarocks, let's try a different approach
+# We'll create a simple lua-utils shim in the runtime
+
 # Create app user
 RUN groupadd -g 1001 appuser && \
     useradd -r -u 1001 -g appuser -m appuser
 
 # Create necessary directories
 RUN mkdir -p /app/.config/nvim /app/data /tmp/workdir /home/appuser
-WORKDIR /tmp/workdir
 
 # Copy Neovim configuration
 COPY .config/nvim/init.lua /app/.config/nvim/
+
+# Copy docgen files, lua-utils shim, and static resources
+COPY docgen/ /app/docgen/
+COPY lua-utils.lua /usr/share/lua/5.1/
+COPY res/ /app/res/
 
 # Copy the built Go binary
 COPY --from=go-builder /app/neorg-lambda /app/
 
 # Set permissions and ownership
 RUN chmod +x /app/neorg-lambda && chown -R appuser:appuser /app /tmp/workdir /opt/nvim /home/appuser
+
+# Set working directory to /app so the Go binary can find docgen files
+WORKDIR /app
 
 # Switch to app user
 USER appuser

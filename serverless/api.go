@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"bytes"
 	"context"
@@ -12,7 +13,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -71,12 +71,6 @@ type (
 		Id    string `json:"id"`
 	}
 
-	ConversionJob struct {
-		InputFile  *os.File
-		OutputFile *os.File
-		Error      error
-	}
-
 	ConversionResult struct {
 		Files []string `json:"files"`
 		Error string  `json:"error,omitempty"`
@@ -98,118 +92,195 @@ func Unauthorized(w http.ResponseWriter, r *http.Request) {
 	w.Write(unauthorizedJson)
 }
 
-const ()
 
-func convertArgs(inputFileName, outputFileName *os.File) []string {
-	return []string{
-		inputFileName.Name(),
-		"--headless",
-		"-c", fmt.Sprintf(":Neorg export to-file %s markdown", outputFileName.Name()),
-		"-c", ":q",
+// Extract tarball and generate documentation using make documentation
+func generateDocumentation(ctx context.Context, tarballData []byte, requestId string) (string, error) {
+	// Create temporary directory for extraction
+	tempDir := fmt.Sprintf("/tmp/neorg_%s", requestId)
+	logger.WithFields(logrus.Fields{
+		"temp_dir": tempDir,
+		"request_id": requestId,
+	}).Debug("Creating temporary directory for project extraction")
+
+	err := os.MkdirAll(tempDir, 0755)
+	if err != nil {
+		logger.WithError(err).Error("Failed to create temporary directory")
+		return "", fmt.Errorf("failed to create temp directory: %v", err)
 	}
+
+	// Extract tarball to temporary directory
+	err = extractTarball(tarballData, tempDir)
+	if err != nil {
+		logger.WithError(err).Error("Failed to extract tarball")
+		os.RemoveAll(tempDir)
+		return "", fmt.Errorf("failed to extract tarball: %v", err)
+	}
+
+	// Copy docgen files to the project directory
+	err = copyDocgenFiles(tempDir)
+	if err != nil {
+		logger.WithError(err).Error("Failed to copy docgen files")
+		os.RemoveAll(tempDir)
+		return "", fmt.Errorf("failed to copy docgen files: %v", err)
+	}
+
+	// Run make documentation in the project directory
+	err = runMakeDocumentation(ctx, tempDir)
+	if err != nil {
+		logger.WithError(err).Error("Failed to run make documentation")
+		os.RemoveAll(tempDir)
+		return "", fmt.Errorf("failed to generate documentation: %v", err)
+	}
+
+	return tempDir, nil
 }
 
-// Convert neorg to markdown using the neovim configuration in the container
-func runNeorgConvert(ctx context.Context, inputFile *os.File) (*os.File, error) {
-	// read the filename and remove the .norg extension
-	filename := filepath.Base(inputFile.Name())
-	originalFilename := filename
-	filename = strings.TrimSuffix(filename, ".norg")
-	outputFilename := filename + ".md"
+// Extract tarball to specified directory
+func extractTarball(tarballData []byte, destDir string) error {
+	tarReader := tar.NewReader(bytes.NewReader(tarballData))
+	
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("error reading tar: %v", err)
+		}
 
-	logger.WithFields(logrus.Fields{
-		"input_file":  originalFilename,
-		"output_file": outputFilename,
-	}).Debug("Starting Neorg conversion")
+		targetPath := filepath.Join(destDir, header.Name)
+		
+		// Ensure the target path is within destDir (security check)
+		if !strings.HasPrefix(targetPath, filepath.Clean(destDir)+string(os.PathSeparator)) {
+			return fmt.Errorf("invalid file path: %s", header.Name)
+		}
 
-	// Create an output file in the current directory
-	outputFile, err := os.Create(outputFilename)
+		switch header.Typeflag {
+		case tar.TypeDir:
+			err = os.MkdirAll(targetPath, os.FileMode(header.Mode))
+			if err != nil {
+				return fmt.Errorf("error creating directory %s: %v", targetPath, err)
+			}
+		case tar.TypeReg:
+			// Ensure parent directory exists
+			err = os.MkdirAll(filepath.Dir(targetPath), 0755)
+			if err != nil {
+				return fmt.Errorf("error creating parent directory for %s: %v", targetPath, err)
+			}
+			
+			file, err := os.OpenFile(targetPath, os.O_CREATE|os.O_RDWR, os.FileMode(header.Mode))
+			if err != nil {
+				return fmt.Errorf("error creating file %s: %v", targetPath, err)
+			}
+			
+			_, err = io.Copy(file, tarReader)
+			file.Close()
+			if err != nil {
+				return fmt.Errorf("error writing file %s: %v", targetPath, err)
+			}
+		}
+	}
+	
+	return nil
+}
+
+// Copy docgen files to the project directory
+func copyDocgenFiles(projectDir string) error {
+	docgenDir := filepath.Join(projectDir, "docgen")
+	err := os.MkdirAll(docgenDir, 0755)
 	if err != nil {
-		logger.WithFields(logrus.Fields{
-			"output_file": outputFilename,
-			"error":       err.Error(),
-		}).Error("Failed to create output file")
-		return nil, err
+		return fmt.Errorf("failed to create docgen directory: %v", err)
 	}
 
-	// Run the neorg command with context timeout
-	args := convertArgs(inputFile, outputFile)
-	cmd := exec.CommandContext(ctx, "/opt/nvim/bin/nvim", args...)
-	
-	logger.WithFields(logrus.Fields{
-		"input_file":  originalFilename,
-		"output_file": outputFilename,
-		"command":     "nvim",
-		"args":        args,
-	}).Debug("Executing Neovim conversion command")
+	// Copy files from ./docgen to projectDir/docgen
+	docgenFiles := []string{"init.lua", "docgen.lua", "fileio.lua", "minimal_init.vim", "simple_norg_converter.lua"}
+	for _, file := range docgenFiles {
+		srcPath := filepath.Join("./docgen", file)
+		destPath := filepath.Join(docgenDir, file)
+		
+		err = copyFile(srcPath, destPath)
+		if err != nil {
+			return fmt.Errorf("failed to copy %s: %v", file, err)
+		}
+	}
 
+	// Create Makefile in project directory
+	makefilePath := filepath.Join(projectDir, "Makefile")
+	makefileContent := `documentation:
+	nvim --headless -c "cd ./docgen" -c "source simple_norg_converter.lua" -c 'qa'
+`
+	err = os.WriteFile(makefilePath, []byte(makefileContent), 0644)
+	if err != nil {
+		return fmt.Errorf("failed to create Makefile: %v", err)
+	}
+
+	return nil
+}
+
+// Copy a file from src to dest
+func copyFile(src, dest string) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+
+	destFile, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
+
+	_, err = io.Copy(destFile, srcFile)
+	return err
+}
+
+// Run make documentation in the specified directory
+func runMakeDocumentation(ctx context.Context, projectDir string) error {
+	logger.WithFields(logrus.Fields{
+		"project_dir": projectDir,
+	}).Debug("Running make documentation")
+
+	cmd := exec.CommandContext(ctx, "make", "documentation")
+	cmd.Dir = projectDir
+	
+	// Set environment variables for Neovim to find its config and plugins
+	cmd.Env = append(os.Environ(),
+		"XDG_CONFIG_HOME=/app",
+		"XDG_DATA_HOME=/app/data",
+		"HOME=/app",
+	)
+	
 	// Capture command output for debugging
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	
-	err = cmd.Run()
+	err := cmd.Run()
 	if err != nil {
 		logger.WithFields(logrus.Fields{
-			"input_file":  originalFilename,
-			"output_file": outputFilename,
+			"project_dir": projectDir,
 			"error":       err.Error(),
-			"command":     fmt.Sprintf("nvim %v", args),
 			"stdout":      stdout.String(),
 			"stderr":      stderr.String(),
-		}).Error("Neovim conversion command failed")
-		
-		outputFile.Close()
-		os.Remove(outputFile.Name())
-		return nil, err
+		}).Error("Make documentation command failed")
+		return err
 	}
 	
-	// Log command output for debugging
 	logger.WithFields(logrus.Fields{
-		"input_file":  originalFilename,
-		"output_file": outputFilename,
+		"project_dir": projectDir,
 		"stdout":      stdout.String(),
 		"stderr":      stderr.String(),
-	}).Debug("Neovim command output")
+	}).Info("Make documentation completed successfully")
 
-	// Check if output file has content
-	outputFile.Seek(0, 0) // Seek back to beginning for reading
-	outputFileInfo, _ := outputFile.Stat()
-	fileSize := outputFileInfo.Size()
-	
-	// Read and log the actual file contents for debugging
-	fileContents, err := io.ReadAll(outputFile)
-	if err != nil {
-		logger.WithError(err).Error("Failed to read output file contents")
-	} else {
-		logger.WithFields(logrus.Fields{
-			"input_file":     originalFilename,
-			"output_file":    outputFilename,
-			"output_size":    fileSize,
-			"file_contents":  string(fileContents),
-			"contents_length": len(fileContents),
-		}).Info("Neorg conversion completed - file contents")
-	}
-	
-	// Reset file pointer for later use
-	outputFile.Seek(0, 0)
-	
-	logger.WithFields(logrus.Fields{
-		"input_file":    originalFilename,
-		"output_file":   outputFilename,
-		"output_size":   fileSize,
-	}).Info("Neorg conversion completed successfully")
-
-	return outputFile, nil
+	return nil
 }
 
-// Get the zip archive of the neorg documents
-// from the body of the request
-// and unzip it as an array of files
-func getNeorgDocuments(r *http.Request) ([]*os.File, error) {
-	logger.Debug("Starting to extract Neorg documents from request body")
+// Get the tarball of the neorg project from the request body
+func getTarballData(r *http.Request) ([]byte, error) {
+	logger.Debug("Reading tarball from request body")
 	
-	// Read the zip from the request body
+	// Read the tarball from the request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		logger.WithFields(logrus.Fields{
@@ -222,270 +293,24 @@ func getNeorgDocuments(r *http.Request) ([]*os.File, error) {
 		"body_size": len(body),
 	}).Debug("Request body read successfully")
 
-	// Unzip the archive
-	zipReader, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
-	if err != nil {
-		logger.WithFields(logrus.Fields{
-			"error":     err.Error(),
-			"body_size": len(body),
-		}).Error("Failed to create zip reader from request body")
-		return nil, err
+	// Basic validation - check if it looks like a tar file
+	if len(body) < 512 {
+		return nil, fmt.Errorf("file too small to be a valid tarball")
 	}
 
-	logger.WithFields(logrus.Fields{
-		"total_files": len(zipReader.File),
-	}).Debug("Zip archive opened successfully")
-
-	// Read the zip file and return the files
-	var files []*os.File
-	var processedFiles, skippedFiles int
-
-	for _, file := range zipReader.File {
-		// Only process .norg files
-		if !strings.HasSuffix(file.Name, ".norg") {
-			logger.WithFields(logrus.Fields{
-				"filename": file.Name,
-			}).Debug("Skipping non-.norg file")
-			skippedFiles++
-			continue
-		}
-
-		logger.WithFields(logrus.Fields{
-			"filename": file.Name,
-			"size":     file.UncompressedSize64,
-		}).Debug("Processing .norg file from archive")
-
-		f, err := file.Open()
-		if err != nil {
-			logger.WithFields(logrus.Fields{
-				"filename": file.Name,
-				"error":    err.Error(),
-			}).Error("Failed to open file from zip archive")
-			return nil, err
-		}
-		defer f.Close()
-
-		// Create unique filename to avoid conflicts
-		uniqueID := uuid.New().String()[:8]
-		filename := fmt.Sprintf("%s_%s", uniqueID, filepath.Base(file.Name))
-		
-		logger.WithFields(logrus.Fields{
-			"original_filename": file.Name,
-			"temp_filename":     filename,
-			"unique_id":         uniqueID,
-		}).Debug("Creating temporary file for processing")
-
-		fileUnzipped, err := os.Create(filename)
-		if err != nil {
-			logger.WithFields(logrus.Fields{
-				"filename": filename,
-				"error":    err.Error(),
-			}).Error("Failed to create temporary file")
-			return nil, err
-		}
-
-		bytesWritten, err := io.Copy(fileUnzipped, f)
-		if err != nil {
-			logger.WithFields(logrus.Fields{
-				"filename": filename,
-				"error":    err.Error(),
-			}).Error("Failed to write file contents to temporary file")
-			fileUnzipped.Close()
-			os.Remove(fileUnzipped.Name())
-			return nil, err
-		}
-
-		logger.WithFields(logrus.Fields{
-			"original_filename": file.Name,
-			"temp_filename":     filename,
-			"bytes_written":     bytesWritten,
-		}).Debug("File extracted successfully to temporary location")
-
-		// Seek to beginning for reading
-		fileUnzipped.Seek(0, 0)
-		files = append(files, fileUnzipped)
-		processedFiles++
-	}
-
-	logger.WithFields(logrus.Fields{
-		"total_files":     len(zipReader.File),
-		"processed_files": processedFiles,
-		"skipped_files":   skippedFiles,
-		"norg_files":      len(files),
-	}).Info("Finished extracting Neorg documents from archive")
-
-	return files, nil
+	return body, nil
 }
 
-func processFiles(ctx context.Context, files []*os.File, maxWorkers int) ([]string, error) {
-	logger.WithFields(logrus.Fields{
-		"file_count":   len(files),
-		"worker_count": maxWorkers,
-	}).Info("Initializing worker pool for file processing")
 
-	jobs := make(chan *os.File, len(files))
-	results := make(chan ConversionJob, len(files))
-	startTime := time.Now()
-
-	// Start worker pool
-	var wg sync.WaitGroup
-	for i := range maxWorkers {
-		wg.Add(1)
-		workerID := i + 1
-		go func() {
-			defer wg.Done()
-			logger.WithFields(logrus.Fields{
-				"worker_id": workerID,
-			}).Debug("Worker started")
-			
-			jobsProcessed := 0
-			for inputFile := range jobs {
-				select {
-				case <-ctx.Done():
-					logger.WithFields(logrus.Fields{
-						"worker_id":      workerID,
-						"jobs_processed": jobsProcessed,
-					}).Warn("Worker stopped due to context cancellation")
-					return
-				default:
-					logger.WithFields(logrus.Fields{
-						"worker_id":  workerID,
-						"input_file": inputFile.Name(),
-					}).Debug("Worker processing file")
-					
-					outputFile, err := runNeorgConvert(ctx, inputFile)
-					results <- ConversionJob{
-						InputFile:  inputFile,
-						OutputFile: outputFile,
-						Error:      err,
-					}
-					jobsProcessed++
-				}
-			}
-			
-			logger.WithFields(logrus.Fields{
-				"worker_id":      workerID,
-				"jobs_processed": jobsProcessed,
-			}).Debug("Worker finished processing all jobs")
-		}()
-	}
-
-	logger.WithFields(logrus.Fields{
-		"worker_count": maxWorkers,
-	}).Debug("All workers started, sending jobs to queue")
-
-	// Send jobs
-	go func() {
-		defer close(jobs)
-		for i, file := range files {
-			select {
-			case jobs <- file:
-				logger.WithFields(logrus.Fields{
-					"file_index": i + 1,
-					"total_files": len(files),
-					"filename": file.Name(),
-				}).Debug("File queued for processing")
-			case <-ctx.Done():
-				logger.WithFields(logrus.Fields{
-					"files_queued": i,
-					"total_files": len(files),
-				}).Warn("Job queuing stopped due to context cancellation")
-				return
-			}
-		}
-		logger.WithFields(logrus.Fields{
-			"total_files": len(files),
-		}).Debug("All files queued for processing")
-	}()
-
-	// Close results channel when all workers are done
-	go func() {
-		wg.Wait()
-		logger.Debug("All workers completed, closing results channel")
-		close(results)
-	}()
-
-	// Collect results
-	var outputFiles []string
-	var conversionErrors []string
-	processedCount := 0
-
-	logger.Debug("Starting to collect conversion results")
-	for job := range results {
-		processedCount++
-		
-		// Clean up input file
-		if job.InputFile != nil {
-			inputFileName := job.InputFile.Name()
-			job.InputFile.Close()
-			os.Remove(job.InputFile.Name())
-			
-			if job.Error != nil {
-				logger.WithFields(logrus.Fields{
-					"input_file": inputFileName,
-					"error":      job.Error.Error(),
-					"processed":  processedCount,
-					"total":      len(files),
-				}).Warn("File conversion failed")
-				conversionErrors = append(conversionErrors, fmt.Sprintf("Error converting %s: %v", inputFileName, job.Error))
-				continue
-			}
-
-			if job.OutputFile != nil {
-				outputFileName := job.OutputFile.Name()
-				outputFiles = append(outputFiles, outputFileName)
-				job.OutputFile.Close()
-				
-				logger.WithFields(logrus.Fields{
-					"input_file":  inputFileName,
-					"output_file": outputFileName,
-					"processed":   processedCount,
-					"total":       len(files),
-				}).Debug("File conversion completed successfully")
-			} else {
-				logger.WithFields(logrus.Fields{
-					"input_file": inputFileName,
-					"processed":  processedCount,
-					"total":      len(files),
-				}).Warn("File conversion completed but no output file generated")
-			}
-		}
-	}
-
-	duration := time.Since(startTime)
-	logger.WithFields(logrus.Fields{
-		"total_files":        len(files),
-		"successful_conversions": len(outputFiles),
-		"failed_conversions": len(conversionErrors),
-		"duration_ms":        duration.Milliseconds(),
-		"files_per_second":   float64(len(files)) / duration.Seconds(),
-	}).Info("File processing completed")
-
-	if len(conversionErrors) > 0 {
-		logger.WithFields(logrus.Fields{
-			"conversion_errors": conversionErrors,
-			"error_count":       len(conversionErrors),
-		}).Error("Some files failed to convert")
-		return outputFiles, fmt.Errorf("conversion errors: %s", strings.Join(conversionErrors, "; "))
-	}
-
-	logger.WithFields(logrus.Fields{
-		"output_files": outputFiles,
-	}).Debug("All files converted successfully")
-
-	return outputFiles, nil
-}
-
-// createZipArchive creates a zip file containing all the converted markdown files
-func createZipArchive(outputFiles []string, requestId string) (string, error) {
-	zipFileName := fmt.Sprintf("converted_%s.zip", requestId)
+// createZipArchive creates a zip file containing all the generated wiki files
+func createZipArchive(wikiDir string, requestId string) (string, error) {
+	zipFileName := fmt.Sprintf("documentation_%s.zip", requestId)
 	
 	logger.WithFields(logrus.Fields{
 		"request_id":     requestId,
 		"zip_filename":   zipFileName,
-		"file_count":     len(outputFiles),
-		"output_files":   outputFiles,
-	}).Info("Creating ZIP archive for converted files")
+		"wiki_dir":       wikiDir,
+	}).Info("Creating ZIP archive for generated documentation")
 
 	zipFile, err := os.Create(zipFileName)
 	if err != nil {
@@ -501,109 +326,105 @@ func createZipArchive(outputFiles []string, requestId string) (string, error) {
 	zipWriter := zip.NewWriter(zipFile)
 	defer zipWriter.Close()
 
+	// Walk through the wiki directory and add all files to the zip
 	var totalBytesAdded int64
-	for i, fileName := range outputFiles {
+	var fileCount int
+	
+	err = filepath.Walk(wikiDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		
+		// Skip directories
+		if info.IsDir() {
+			return nil
+		}
+		
+		// Get relative path from wiki directory
+		relPath, err := filepath.Rel(wikiDir, path)
+		if err != nil {
+			return err
+		}
+		
 		logger.WithFields(logrus.Fields{
 			"request_id":      requestId,
-			"file_index":      i + 1,
-			"total_files":     len(outputFiles),
-			"processing_file": fileName,
+			"file_path":       path,
+			"relative_path":   relPath,
+			"file_size":       info.Size(),
 		}).Debug("Adding file to ZIP archive")
 
-		// Read the converted markdown file
-		markdownFile, err := os.Open(fileName)
+		// Open the file
+		file, err := os.Open(path)
 		if err != nil {
 			logger.WithFields(logrus.Fields{
 				"request_id": requestId,
-				"filename":   fileName,
+				"file_path":  path,
 				"error":      err.Error(),
-			}).Error("Failed to open converted file for ZIP archive")
-			return "", fmt.Errorf("failed to open %s: %v", fileName, err)
+			}).Error("Failed to open file for ZIP archive")
+			return err
 		}
+		defer file.Close()
 
-		// Get file info for the header
-		info, err := markdownFile.Stat()
-		if err != nil {
-			markdownFile.Close()
-			logger.WithFields(logrus.Fields{
-				"request_id": requestId,
-				"filename":   fileName,
-				"error":      err.Error(),
-			}).Error("Failed to get file info for ZIP archive")
-			return "", fmt.Errorf("failed to stat %s: %v", fileName, err)
-		}
-
-		// Create a file header based on the file info
+		// Create a file header
 		header, err := zip.FileInfoHeader(info)
 		if err != nil {
-			markdownFile.Close()
 			logger.WithFields(logrus.Fields{
 				"request_id": requestId,
-				"filename":   fileName,
+				"file_path":  path,
 				"error":      err.Error(),
 			}).Error("Failed to create ZIP header for file")
-			return "", fmt.Errorf("failed to create header for %s: %v", fileName, err)
+			return err
 		}
 
-		// Use only the base filename in the zip (remove any path prefixes)
-		header.Name = filepath.Base(fileName)
+		// Use the relative path as the name in the zip
+		header.Name = relPath
 		header.Method = zip.Deflate
-
-		logger.WithFields(logrus.Fields{
-			"request_id":    requestId,
-			"filename":      fileName,
-			"zip_entry":     header.Name,
-			"file_size":     info.Size(),
-		}).Debug("Creating ZIP entry for file")
 
 		// Create the file in the zip
 		writer, err := zipWriter.CreateHeader(header)
 		if err != nil {
-			markdownFile.Close()
 			logger.WithFields(logrus.Fields{
 				"request_id": requestId,
-				"filename":   fileName,
+				"file_path":  path,
 				"zip_entry":  header.Name,
 				"error":      err.Error(),
 			}).Error("Failed to create ZIP entry for file")
-			return "", fmt.Errorf("failed to create zip entry for %s: %v", fileName, err)
+			return err
 		}
 
 		// Copy the file content to the zip
-		bytesWritten, err := io.Copy(writer, markdownFile)
-		markdownFile.Close()
+		bytesWritten, err := io.Copy(writer, file)
 		if err != nil {
 			logger.WithFields(logrus.Fields{
 				"request_id": requestId,
-				"filename":   fileName,
+				"file_path":  path,
 				"zip_entry":  header.Name,
 				"error":      err.Error(),
 			}).Error("Failed to write file content to ZIP")
-			return "", fmt.Errorf("failed to write %s to zip: %v", fileName, err)
+			return err
 		}
 
 		totalBytesAdded += bytesWritten
+		fileCount++
+		
 		logger.WithFields(logrus.Fields{
 			"request_id":     requestId,
-			"filename":       fileName,
+			"file_path":      path,
 			"zip_entry":      header.Name,
 			"bytes_written":  bytesWritten,
-			"file_index":     i + 1,
-			"total_files":    len(outputFiles),
 		}).Debug("File successfully added to ZIP archive")
 
-		// Clean up the temporary markdown file
-		os.Remove(fileName)
-		logger.WithFields(logrus.Fields{
-			"request_id": requestId,
-			"filename":   fileName,
-		}).Debug("Temporary file cleaned up")
+		return nil
+	})
+	
+	if err != nil {
+		return "", fmt.Errorf("failed to walk wiki directory: %v", err)
 	}
 
 	logger.WithFields(logrus.Fields{
 		"request_id":        requestId,
 		"zip_filename":      zipFileName,
-		"files_added":       len(outputFiles),
+		"files_added":       fileCount,
 		"total_bytes_added": totalBytesAdded,
 	}).Info("ZIP archive creation completed successfully")
 
@@ -638,70 +459,61 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	// Get the neorg documents from the request body
-	neorgDocuments, err := getNeorgDocuments(r)
+	// Get the tarball data from the request body
+	tarballData, err := getTarballData(r)
 	if err != nil {
 		logger.WithFields(logrus.Fields{
 			"request_id": requestId,
 			"error": err.Error(),
-		}).Error("Failed to get neorg documents from request")
+		}).Error("Failed to get tarball from request")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(Response{
-			Error: "Failed to process zip file",
+			Error: "Failed to process tarball",
 			Id:    requestId,
 		})
 		return
 	}
-
-	if len(neorgDocuments) == 0 {
-		logger.WithFields(logrus.Fields{
-			"request_id": requestId,
-		}).Warn("No .norg files found in uploaded zip archive")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(Response{
-			Error: "No .norg files found in uploaded zip",
-			Id:    requestId,
-		})
-		return
-	}
-
-	// Process files with worker pool (max 3 concurrent conversions)
-	maxWorkers := min(len(neorgDocuments), 3)
 
 	logger.WithFields(logrus.Fields{
 		"request_id": requestId,
-		"file_count": len(neorgDocuments),
-		"worker_count": maxWorkers,
-	}).Info("Starting file processing with worker pool")
-	outputFiles, err := processFiles(ctx, neorgDocuments, maxWorkers)
+		"tarball_size": len(tarballData),
+	}).Info("Starting documentation generation")
 
+	// Generate documentation using the Neorg approach
+	projectDir, err := generateDocumentation(ctx, tarballData, requestId)
 	if err != nil {
 		logger.WithFields(logrus.Fields{
 			"request_id": requestId,
 			"error": err.Error(),
-		}).Error("Failed to process files with worker pool")
+		}).Error("Failed to generate documentation")
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(Response{
-			Error: fmt.Sprintf("Conversion failed: %v", err),
+			Error: fmt.Sprintf("Documentation generation failed: %v", err),
 			Id:    requestId,
 		})
 		return
 	}
 
-	if len(outputFiles) == 0 {
+	// Clean up project directory when done
+	defer os.RemoveAll(projectDir)
+
+	// Check if wiki directory was created
+	wikiDir := filepath.Join(projectDir, "wiki")
+	if _, err := os.Stat(wikiDir); os.IsNotExist(err) {
 		logger.WithFields(logrus.Fields{
 			"request_id": requestId,
-		}).Error("No files were converted successfully - check Neovim configuration")
+			"wiki_dir": wikiDir,
+		}).Error("Wiki directory was not created - documentation generation may have failed")
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(Response{
-			Error: "No files were converted successfully",
+			Error: "No documentation was generated",
 			Id:    requestId,
 		})
 		return
 	}
 
-	// Create zip archive of converted files
-	zipFileName, err := createZipArchive(outputFiles, requestId)
+	// Create zip archive of generated documentation
+	zipFileName, err := createZipArchive(wikiDir, requestId)
 	if err != nil {
 		logger.WithFields(logrus.Fields{
 			"request_id": requestId,
@@ -715,13 +527,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Clean up individual output files and zip file after response
-	defer func() {
-		for _, file := range outputFiles {
-			os.Remove(file)
-		}
-		os.Remove(zipFileName)
-	}()
+	// Clean up zip file after response
+	defer os.Remove(zipFileName)
 
 	// Open the zip file for reading
 	zipFile, err := os.Open(zipFileName)
@@ -756,16 +563,15 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 	// Set response headers for file download
 	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"converted_markdown_%s.zip\"", requestId))
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"neorg_documentation_%s.zip\"", requestId))
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", zipInfo.Size()))
 	w.Header().Set("request-id", requestId)
 
 	// Stream the zip file to the response
 	logger.WithFields(logrus.Fields{
 		"request_id": requestId,
-		"converted_files": len(outputFiles),
 		"zip_size_bytes": zipInfo.Size(),
-	}).Info("Successfully converted files, sending response")
+	}).Info("Successfully generated documentation, sending response")
 	w.WriteHeader(http.StatusOK)
 	_, err = io.Copy(w, zipFile)
 	if err != nil {
@@ -839,33 +645,34 @@ func (rw *responseWriter) Write(b []byte) (int, error) {
 	return n, err
 }
 
-// checkNeorgHealth runs Neovim health check for Neorg functionality
+// checkNeorgHealth runs a simple test to verify Neovim and make are available
 func checkNeorgHealth() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	
-	cmd := exec.CommandContext(ctx, "/opt/nvim/bin/nvim", "--headless", "-c", ":checkhealth neorg", "-c", ":q")
-	
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	
+	// Check if nvim is available
+	cmd := exec.CommandContext(ctx, "/opt/nvim/bin/nvim", "--version")
 	err := cmd.Run()
-	
-	// Log the health check output
-	logger.WithFields(logrus.Fields{
-		"stdout": stdout.String(),
-		"stderr": stderr.String(),
-		"error":  err,
-	}).Debug("Neorg health check output")
-	
-	// Check for specific error indicators in the output
-	output := stdout.String() + stderr.String()
-	if strings.Contains(output, "ERROR") || strings.Contains(output, "command is currently disabled") {
-		return fmt.Errorf("neorg health check failed: %s", output)
+	if err != nil {
+		return fmt.Errorf("nvim not available: %v", err)
 	}
 	
-	return err
+	// Check if make is available
+	cmd = exec.CommandContext(ctx, "make", "--version")
+	err = cmd.Run()
+	if err != nil {
+		return fmt.Errorf("make not available: %v", err)
+	}
+	
+	// Check if docgen files exist
+	docgenFiles := []string{"./docgen/init.lua", "./docgen/docgen.lua", "./docgen/fileio.lua", "./docgen/minimal_init.vim"}
+	for _, file := range docgenFiles {
+		if _, err := os.Stat(file); os.IsNotExist(err) {
+			return fmt.Errorf("docgen file missing: %s", file)
+		}
+	}
+	
+	return nil
 }
 
 func check_health(w http.ResponseWriter, r *http.Request) {
@@ -889,6 +696,7 @@ func check_health(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	port := getEnv("PORT", "8080")
 	logger.WithFields(logrus.Fields{
 		"service": "neorg-documentation-lambda",
 		"port":    "8080",
@@ -898,9 +706,9 @@ func main() {
 	http.HandleFunc("/", LoggingMiddleware(handler))
 	http.HandleFunc("/health", LoggingMiddleware(check_health))
 	
-	logger.Info("Server routes registered, starting HTTP server on :8080")
+	logger.Info("Server routes registered, starting HTTP server on port " + port)
 	
-	if err := http.ListenAndServe(":8080", nil); err != nil {
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		logger.WithFields(logrus.Fields{
 			"error": err.Error(),
 			"port":  "8080",
