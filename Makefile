@@ -3,7 +3,7 @@ AUTH_TOKEN=test-token-123
 CONTAINER_NAME=neorg.documentation.lambda
 HUMAN_READABLE_NAME=Neorg.Documentation.Lambda
 USERNAME=adamkali
-DOCKER_REGISTRY=registry.kalilarosa.xyz
+DOCKER_REGISTRY=ghcr.io
 PORT=2025
 
 # Colors for output
@@ -60,8 +60,8 @@ test-unzip:
 push-to-registry:
 	@echo "$(BLUE)Pushing $(CONTAINER_NAME):$(NC)"
 	@echo "$(YELLOW)  $(DOCKER_REGISTRY)/$(CONTAINER_NAME):$(NC) will be uploaded."
-	docker tag $(CONTAINER_NAME):$(shell git rev-parse --short HEAD) $(DOCKER_REGISTRY)/$(CONTAINER_NAME):$(shell git rev-parse --short HEAD)
-	docker push $(DOCKER_REGISTRY)/$(CONTAINER_NAME):$(shell git rev-parse --short HEAD)
+	docker tag $(CONTAINER_NAME):$(shell git rev-parse --short HEAD) $(DOCKER_REGISTRY)/$(USERNAME)/$(CONTAINER_NAME):$(shell git rev-parse --short HEAD)
+	docker push $(DOCKER_REGISTRY)/$(USERNAME)/$(CONTAINER_NAME):$(shell git rev-parse --short HEAD)
 	@echo "$(GREEN)  Pushed $(DOCKER_REGISTRY)/$(CONTAINER_NAME):$(NC)"
 
 install: clean-test-data docker-build
