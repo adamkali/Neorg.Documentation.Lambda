@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  neorg-converter:
+    image: registry.kalilarosa.xyz/neorg.documentation.lambda:2191fca
+    container_name: neorg-documentation-lambda
+    restart: unless-stopped
+    ports:
+      - "2025:2025"
+    environment:
+      - PORT=2025
+      - NEORG_DOCUMENTATION_AUTH_TOKEN=${NEORG_AUTH_TOKEN:-change-me-in-production}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - LOG_FORMAT=${LOG_FORMAT:-text}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:2025/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    volumes:
+      # Optional: Mount for persistent logs (if needed)
+      - ./logs:/app/logs:rw
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
+
