@@ -61,7 +61,9 @@ push-to-registry:
 	@echo "$(BLUE)Pushing $(CONTAINER_NAME):$(NC)"
 	@echo "$(YELLOW)  $(DOCKER_REGISTRY)/$(CONTAINER_NAME):$(NC) will be uploaded."
 	docker tag $(CONTAINER_NAME):$(shell git rev-parse --short HEAD) $(DOCKER_REGISTRY)/$(USERNAME)/$(CONTAINER_NAME):$(shell git rev-parse --short HEAD)
+	docker tag $(CONTAINER_NAME):$(shell git rev-parse --short HEAD) $(DOCKER_REGISTRY)/$(USERNAME)/$(CONTAINER_NAME):latest
 	docker push $(DOCKER_REGISTRY)/$(USERNAME)/$(CONTAINER_NAME):$(shell git rev-parse --short HEAD)
+	docker push $(DOCKER_REGISTRY)/$(USERNAME)/$(CONTAINER_NAME):latest
 	@echo "$(GREEN)  Pushed $(DOCKER_REGISTRY)/$(CONTAINER_NAME):$(NC)"
 
 install: clean-test-data docker-build
