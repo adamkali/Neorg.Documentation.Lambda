@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -135,9 +136,24 @@ func generateDocumentation(ctx context.Context, tarballData []byte, requestId st
 	return tempDir, nil
 }
 
-// Extract tarball to specified directory
+// Extract tarball to specified directory (supports both .tar and .tar.gz)
 func extractTarball(tarballData []byte, destDir string) error {
-	tarReader := tar.NewReader(bytes.NewReader(tarballData))
+	var tarReader *tar.Reader
+	
+	// Check if the data is gzip-compressed by trying to create a gzip reader
+	dataReader := bytes.NewReader(tarballData)
+	gzipReader, err := gzip.NewReader(dataReader)
+	if err != nil {
+		// Not gzip-compressed, treat as plain tar
+		logger.Debug("Archive is not gzip-compressed, treating as plain tar")
+		dataReader.Seek(0, 0) // Reset reader position
+		tarReader = tar.NewReader(dataReader)
+	} else {
+		// Gzip-compressed, decompress first
+		logger.Debug("Archive is gzip-compressed, decompressing before tar extraction")
+		defer gzipReader.Close()
+		tarReader = tar.NewReader(gzipReader)
+	}
 	
 	for {
 		header, err := tarReader.Next()
@@ -293,9 +309,32 @@ func getTarballData(r *http.Request) ([]byte, error) {
 		"body_size": len(body),
 	}).Debug("Request body read successfully")
 
-	// Basic validation - check if it looks like a tar file
+	// Basic validation - check if it looks like a tar or tar.gz file
 	if len(body) < 512 {
 		return nil, fmt.Errorf("file too small to be a valid tarball")
+	}
+	
+	// Check for common archive signatures
+	isValidArchive := false
+	if len(body) >= 3 {
+		// Check for gzip magic number (1f 8b)
+		if body[0] == 0x1f && body[1] == 0x8b {
+			logger.Debug("Detected gzip-compressed archive")
+			isValidArchive = true
+		}
+	}
+	if len(body) >= 512 {
+		// Check for tar file (look for ustar magic in tar header)
+		// The ustar magic is at offset 257-261 in a tar header
+		if bytes.Contains(body[257:262], []byte("ustar")) {
+			logger.Debug("Detected uncompressed tar archive")
+			isValidArchive = true
+		}
+	}
+	
+	if !isValidArchive {
+		logger.Debug("Archive format validation: accepting file despite unknown signature")
+		// Still allow the file through - the extraction function will handle format detection
 	}
 
 	return body, nil

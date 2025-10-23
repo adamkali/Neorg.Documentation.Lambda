@@ -17,7 +17,7 @@ NC := \033[0m # No Color
 
 clean-test-data:
 	@echo "$(YELLOW)Cleaning up test data:$(NC)"
-	rm -f *.tar *.zip *.md
+	rm -f *.tar *.zip
 	@echo "$(GREEN)Test data cleaned$(NC)"
 
 docker-build: clean-test-data 
