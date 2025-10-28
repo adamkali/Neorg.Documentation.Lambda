@@ -32,11 +32,10 @@ make test-unzip      # Extract and examine converted output
 make documentation   # Run Neovim conversion locally (headless mode)
 ```
 
-### Docker Compose Deployment
+### Additional Make Targets
 ```bash
-docker-compose up -d    # Start service with environment config
-docker-compose logs -f  # Monitor service logs  
-docker-compose down     # Stop and remove containers
+make docker-logs      # View container logs (last 10 lines)
+make upload          # Build + push to registry workflow
 ```
 
 ### Go Development
@@ -83,10 +82,13 @@ LOG_LEVEL=info                         # Logging verbosity (debug/info/warn/erro
 LOG_FORMAT=text                        # Log output format (text/json)
 ```
 
-### Docker Compose Variables
+### Environment File Configuration
+Based on `.env.example`, these variables can be configured:
 ```bash
 NEORG_AUTH_TOKEN=<token>               # Maps to NEORG_DOCUMENTATION_AUTH_TOKEN
-DOMAIN=neorg-converter.domain.com      # Traefik/reverse proxy configuration
+DOMAIN=neorg-converter.domain.com      # Domain configuration for deployment
+LOG_LEVEL=info                         # Logging verbosity override
+LOG_FORMAT=text                        # Log format override
 ```
 
 ## Key File Locations

@@ -40,6 +40,15 @@ local function convert_norg_to_markdown(norg_file)
         return nil
     end
     
+    -- Check if file has a top-level header (starts with single *)
+    local has_top_level_header = false
+    for _, line in ipairs(content) do
+        if line:match("^%*[^%*]") then -- Single * NOT followed by another *
+            has_top_level_header = true
+            break
+        end
+    end
+    
     -- Basic Neorg to Markdown conversion
     local markdown_lines = {}
     local in_code_block = false
@@ -55,9 +64,9 @@ local function convert_norg_to_markdown(norg_file)
             in_meta_block = false
             goto continue
         elseif in_meta_block then
-            -- Extract title from meta if available
+            -- Extract title from meta if available, but only if no top-level header exists
             local title = line:match("^title:%s*(.+)")
-            if title then
+            if title and not has_top_level_header then
                 table.insert(markdown_lines, "# " .. title)
                 table.insert(markdown_lines, "")
             end
@@ -93,7 +102,21 @@ local function convert_norg_to_markdown(norg_file)
             end
         end
         
-        -- Convert list items
+        -- Convert TODO items with task status
+        local todo_match = line:match("^(%s*)([%-~%*]+)%s*%((.-)%)%s*(.*)")
+        if todo_match then
+            local indent, marker, status, text = line:match("^(%s*)([%-~%*]+)%s*%((.-)%)%s*(.*)")
+            if marker and status and text then
+                local indent_level = math.max(0, (#marker - 1) * 2)
+                -- Check if task is completed (x) or unchecked (empty or just spaces)
+                local checkbox = (status == "" or status:match("^%s*$")) and "[ ]" or "[x]"
+                local md_line = string.rep(" ", indent_level) .. "- " .. checkbox .. " " .. text
+                table.insert(markdown_lines, md_line)
+                goto continue
+            end
+        end
+        
+        -- Convert regular list items
         local list_match = line:match("^(%s*)([%-~]+)%s*(.*)")
         if list_match then
             local indent, marker, text = line:match("^(%s*)([%-~]+)%s*(.*)")
