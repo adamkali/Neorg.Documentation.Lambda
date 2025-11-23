@@ -76,6 +76,24 @@ function converter.convert_norg_to_markdown(norg_file)
             table.insert(markdown_lines, line)
             goto continue
         end
+
+		-- Convert TODO items with task status
+		-- - ( ) -> - [ ]
+		-- - (x) -> - [x]
+		-- - (h) -> - [~]
+		-- - (anything else) -> - [ ]
+		local todo_match = line:match("^(%s*)([%-~%*]+)%s*%((.-)%)%s*(.*)")
+		if todo_match then
+			local indent, marker, status, text = line:match("^(%s*)([%-~%*]+)%s*%((.-)%)%s*(.*)")
+			if marker and status and text then
+				local indent_level = math.max(0, (#marker - 1) * 2)
+				-- Check if task is completed (x) or unchecked (empty or just spaces)
+				local checkbox = (status == "" or status:match("^%s*$")) and "[ ]" or "[x]"
+				local md_line = string.rep(" ", indent_level) .. "- " .. checkbox .. " " .. text
+				table.insert(markdown_lines, md_line)
+				goto continue
+			end
+		end
         
         -- Convert headers (* -> #, ** -> ##, etc.)
         local header_level = line:match("^(%*+)")
