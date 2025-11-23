@@ -107,6 +107,19 @@ local function convert_norg_to_markdown(norg_file)
         if todo_match then
             local indent, marker, status, text = line:match("^(%s*)([%-~%*]+)%s*%((.-)%)%s*(.*)")
             if marker and status and text then
+                -- Apply inline formatting to the text content
+                text = text:gsub("{%*%s*(.-)%s*%*}", "**%1**")
+                text = text:gsub("{/%s*(.-)%s*/}", "*%1*")
+                text = text:gsub("{`%s*(.-)%s*`}", "`%1`")
+                text = text:gsub("{%-%s*(.-)%s*%-}", "~~%1~~")
+                -- Links: {url}[text] -> [text](url)
+                text = text:gsub("{([^}]+)}%[([^%]]+)%]", "[%2](%1)")
+                -- Anchors: [text]{url} -> [text](url)
+                text = text:gsub("%[([^%]]+)%]{([^}]+)}", "[%1](%2)")
+                -- Simple links: {url} -> [url](url)
+                text = text:gsub("{(https?://[^}]+)}", "[%1](%1)")
+                text = text:gsub("{(file://[^}]+)}", "[%1](%1)")
+
                 local indent_level = math.max(0, (#marker - 1) * 2)
                 -- Check if task is completed (x) or unchecked (empty or just spaces)
                 local checkbox = (status == "" or status:match("^%s*$")) and "[ ]" or "[x]"
@@ -115,12 +128,25 @@ local function convert_norg_to_markdown(norg_file)
                 goto continue
             end
         end
-        
+
         -- Convert regular list items
         local list_match = line:match("^(%s*)([%-~]+)%s*(.*)")
         if list_match then
             local indent, marker, text = line:match("^(%s*)([%-~]+)%s*(.*)")
             if marker and text then
+                -- Apply inline formatting to the text content
+                text = text:gsub("{%*%s*(.-)%s*%*}", "**%1**")
+                text = text:gsub("{/%s*(.-)%s*/}", "*%1*")
+                text = text:gsub("{`%s*(.-)%s*`}", "`%1`")
+                text = text:gsub("{%-%s*(.-)%s*%-}", "~~%1~~")
+                -- Links: {url}[text] -> [text](url)
+                text = text:gsub("{([^}]+)}%[([^%]]+)%]", "[%2](%1)")
+                -- Anchors: [text]{url} -> [text](url)
+                text = text:gsub("%[([^%]]+)%]{([^}]+)}", "[%1](%2)")
+                -- Simple links: {url} -> [url](url)
+                text = text:gsub("{(https?://[^}]+)}", "[%1](%1)")
+                text = text:gsub("{(file://[^}]+)}", "[%1](%1)")
+
                 local indent_level = math.max(0, (#marker - 1) * 2)
                 local list_char = marker:match("^%-") and "-" or "1."
                 local md_line = string.rep(" ", indent_level) .. list_char .. " " .. text
@@ -141,6 +167,11 @@ local function convert_norg_to_markdown(norg_file)
         converted_line = converted_line:gsub("{%-%s*(.-)%s*%-}", "~~%1~~")
         -- Links: {url}[text] -> [text](url)
         converted_line = converted_line:gsub("{([^}]+)}%[([^%]]+)%]", "[%2](%1)")
+        -- Anchors: [text]{url} -> [text](url)
+        converted_line = converted_line:gsub("%[([^%]]+)%]{([^}]+)}", "[%1](%2)")
+        -- Simple links: {url} -> [url](url) - only for URLs starting with http/https/file
+        converted_line = converted_line:gsub("{(https?://[^}]+)}", "[%1](%1)")
+        converted_line = converted_line:gsub("{(file://[^}]+)}", "[%1](%1)")
         
         table.insert(markdown_lines, converted_line)
         
